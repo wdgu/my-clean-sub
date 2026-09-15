@@ -1,0 +1,54 @@
+import yaml
+import re
+
+SOURCE_FILE = "source.yaml"
+OUTPUT_FILE = "clash_fixed.yaml"
+
+# C1控制字符 \x80‑\x9F，go‑yaml v3报错元凶
+C1_CTRL_PATTERN = re.compile(r'[\x80-\x9F]')
+
+def sanitize_string(s: str) -> str:
+    # 清除C1控制字符
+    s = C1_CTRL_PATTERN.sub('', s)
+    return s
+
+def fix_proxy(proxy: dict):
+    # 清洗所有字符串值，移除C1控制字符
+    for k, v in list(proxy.items()):
+        if isinstance(v, str):
+            proxy[k] = sanitize_string(v)
+
+    tp = proxy.get("type", "")
+    # 修复 network 字段：只允许合法值 tcp / ws / grpc / raw
+    valid_network = {"tcp", "ws", "grpc", "raw", "http"}
+    net = proxy.get("network")
+    if net and net not in valid_network:
+        # network带链接/emoji碎片，强制重置为tcp
+        proxy["network"] = "tcp"
+
+    # 处理sni字段：如果看起来是http链接/url编码内容，直接置空
+    sni = proxy.get("sni", "")
+    if sni:
+        if sni.startswith(("http://", "https://")) or "%" in sni:
+            proxy["sni"] = ""
+
+    return proxy
+
+def main():
+    with open(SOURCE_FILE, "r", encoding="utf‑8") as f:
+        raw_data = yaml.load(f, Loader=yaml.FullLoader)
+
+    proxies = raw_data.get("proxies", [])
+    fixed_proxies = []
+    for p in proxies:
+        fp = fix_proxy(p)
+        fixed_proxies.append(fp)
+    raw_data["proxies"] = fixed_proxies
+
+    with open(OUTPUT_FILE, "w", encoding="utf‑8") as f:
+        yaml.dump(raw_data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    print(f"完成清洗，输出:{OUTPUT_FILE}, 节点数量:{len(fixed_proxies)}")
+
+if __name__ == "__main__":
+    main()
+
