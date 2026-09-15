@@ -17,6 +17,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install python dependencies
+        run: |
+          python3 -m pip install pyyaml
+
       - name: Download source clash.yaml
         run: |
           curl -L -o source.yaml "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
