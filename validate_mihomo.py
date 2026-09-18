@@ -8,6 +8,7 @@ CONFIG = Path(sys.argv[1] if len(sys.argv) > 1 else "clash_fixed.yaml")
 MIHOMO = Path(sys.argv[2] if len(sys.argv) > 2 else "./mihomo")
 MAX_REPAIRS = 500
 PROXY_ERROR = re.compile(r"proxy\s+(\d+)\s*:\s*(.+)", re.IGNORECASE)
+BUILTINS = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "BLOCK", "GLOBAL", "SYSTEM"}
 
 def run_test():
     p = subprocess.run(
@@ -23,7 +24,41 @@ def load_config():
         raise ValueError("config has no proxies list")
     return data
 
+def prune_references(data):
+    names = {p.get("name") for p in data.get("proxies", []) if isinstance(p, dict)}
+    groups = data.get("proxy-groups", [])
+    if isinstance(groups, list):
+        group_names = {g.get("name") for g in groups if isinstance(g, dict)}
+        allowed = names | group_names | BUILTINS
+        new_groups = []
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            refs = g.get("proxies")
+            if isinstance(refs, list):
+                g["proxies"] = [x for x in refs if x in allowed]
+                if not g["proxies"]:
+                    continue
+            new_groups.append(g)
+        data["proxy-groups"] = new_groups
+
+        group_names = {g.get("name") for g in new_groups if isinstance(g, dict)}
+        allowed = names | group_names | BUILTINS
+        rules = data.get("rules")
+        if isinstance(rules, list):
+            cleaned = []
+            for rule in rules:
+                if not isinstance(rule, str):
+                    continue
+                parts = rule.split(",")
+                target = parts[-1].strip() if len(parts) >= 2 else ""
+                if target and target not in allowed:
+                    continue
+                cleaned.append(rule)
+            data["rules"] = cleaned
+
 def save_config(data):
+    prune_references(data)
     tmp = CONFIG.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False,
@@ -34,6 +69,7 @@ def main():
     if not CONFIG.exists() or not MIHOMO.exists():
         print("[FATAL] validation input missing")
         return 1
+
     data = load_config()
     dropped = []
 
@@ -70,6 +106,7 @@ def main():
         if not data["proxies"]:
             print("[FATAL] no proxies remain")
             return 1
+
         save_config(data)
 
     print("[FATAL] Mihomo repair limit exceeded")
