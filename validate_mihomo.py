@@ -2,20 +2,28 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
 import yaml
 
-CONFIG = Path(sys.argv[1] if len(sys.argv) > 1 else "clash_fixed.yaml")
-MIHOMO = Path(sys.argv[2] if len(sys.argv) > 2 else "./mihomo")
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG = (BASE_DIR / (sys.argv[1] if len(sys.argv) > 1 else "clash_fixed.yaml")).resolve()
+MIHOMO = (BASE_DIR / (sys.argv[2] if len(sys.argv) > 2 else "mihomo")).resolve()
 MAX_REPAIRS = 500
 PROXY_ERROR = re.compile(r"proxy\s+(\d+)\s*:\s*(.+)", re.IGNORECASE)
 BUILTINS = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "BLOCK", "GLOBAL", "SYSTEM"}
 
+
 def run_test():
     p = subprocess.run(
         [str(MIHOMO), "-t", "-f", str(CONFIG)],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90,
+        cwd=str(BASE_DIR),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=90,
     )
     return p.returncode, p.stdout
+
 
 def load_config():
     with CONFIG.open("r", encoding="utf-8") as f:
@@ -23,6 +31,7 @@ def load_config():
     if not isinstance(data, dict) or not isinstance(data.get("proxies"), list):
         raise ValueError("config has no proxies list")
     return data
+
 
 def prune_references(data):
     names = {p.get("name") for p in data.get("proxies", []) if isinstance(p, dict)}
@@ -57,21 +66,38 @@ def prune_references(data):
                 cleaned.append(rule)
             data["rules"] = cleaned
 
+
 def save_config(data):
     prune_references(data)
     tmp = CONFIG.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as f:
-        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False,
-                       default_flow_style=False, width=4096)
+        yaml.safe_dump(
+            data,
+            f,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+            width=4096,
+        )
     tmp.replace(CONFIG)
 
+
 def main():
-    if not CONFIG.exists() or not MIHOMO.exists():
+    if not CONFIG.exists() or not MIHOMO.is_file():
         print("[FATAL] validation input missing")
+        print(f"[FATAL] config : {CONFIG}")
+        print(f"[FATAL] mihomo : {MIHOMO}")
+        return 1
+
+    if not MIHOMO.stat().st_mode & 0o111:
+        print(f"[FATAL] Mihomo is not executable: {MIHOMO}")
         return 1
 
     data = load_config()
     dropped = []
+
+    print(f"[INFO] Config : {CONFIG}")
+    print(f"[INFO] Mihomo : {MIHOMO}")
 
     for _ in range(MAX_REPAIRS + 1):
         code, output = run_test()
@@ -111,6 +137,7 @@ def main():
 
     print("[FATAL] Mihomo repair limit exceeded")
     return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())
