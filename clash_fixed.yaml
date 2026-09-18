@@ -17231,7 +17231,6 @@ proxy-groups:
   url: https://www.gstatic.com/generate_204
 - name: select
   proxies:
-  - auto
   - hysteria2-1232696196
   - hysteria2-1308897119
   - hysteria2-591454513
