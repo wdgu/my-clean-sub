@@ -4,34 +4,79 @@ on:
   schedule:
     - cron: '0 */4 * * *'
 
+permissions:
+  contents: write
+
 jobs:
   run_clean:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Install python
+      - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install python dependencies
+      - name: Install Python dependencies
         run: |
-          python3 -m pip install pyyaml
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check pyyaml
 
       - name: Download source clash.yaml
         run: |
-          curl -L -o source.yaml "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
+          set -euo pipefail
+          curl -fL --retry 4 --retry-delay 3 --connect-timeout 15 --max-time 180 \
+            -o source.yaml \
+            "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
+          test -s source.yaml
+          python3 - <<'PY'
+          import yaml
+          with open("source.yaml", "r", encoding="utf-8") as f:
+              data = yaml.safe_load(f)
+          if not isinstance(data, dict) or not isinstance(data.get("proxies"), list):
+              raise SystemExit("source.yaml is not a valid Clash YAML with a proxies list")
+          print(f"Downloaded source proxies: {len(data['proxies'])}")
+          PY
 
       - name: Run clean script
-        run: python3 clean.py
+        run: |
+          set -euo pipefail
+          python3 clean.py
+          test -s clash_fixed.yaml
+
+      - name: Final YAML validation
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import yaml
+
+          with open("clash_fixed.yaml", "r", encoding="utf-8") as f:
+              data = yaml.safe_load(f)
+
+          proxies = data.get("proxies") if isinstance(data, dict) else None
+          if not isinstance(proxies, list) or not proxies:
+              raise SystemExit("clash_fixed.yaml has no valid proxies")
+
+          for i, proxy in enumerate(proxies, 1):
+              if not isinstance(proxy, dict):
+                  raise SystemExit(f"proxy {i} is not a mapping")
+
+          print(f"Final proxies: {len(proxies)}")
+          PY
 
       - name: Commit & push cleaned file
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add clash_fixed.yaml
-          git commit -m "auto update cleaned sub" || echo "no changes"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "auto update cleaned sub"
+            git push
+          fi
