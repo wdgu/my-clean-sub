@@ -1,214 +1,436 @@
-import yaml
 import re
 import sys
+from urllib.parse import unquote, urlsplit
+
+import yaml
 
 SOURCE_FILE = "source.yaml"
 OUTPUT_FILE = "clash_fixed.yaml"
 
-C1_CTRL_PATTERN = re.compile(r'[\x80-\x9F]')
-HEX_PATTERN = re.compile(r'^[0-9a-fA-F]+$')
+CONTROL_PATTERN = re.compile(
+    r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]"
+)
+HEX_PATTERN = re.compile(r"^[0-9a-fA-F]+$")
+HOST_PATTERN = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9_\-.:\[\]]+$")
 
-# Mihomo/Clash 常见 proxy 类型
-VALID_TYPES = {
-    "vless", "vmess", "trojan", "ss", "ssr",
-    "socks5", "http", "hysteria", "hysteria2", "tuic",
-    "wireguard", "snell"
+BUILTIN_POLICIES = {
+    "DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE",
+    "BLOCK", "GLOBAL", "SYSTEM"
 }
 
-VALID_NETWORK = {"tcp", "ws", "grpc", "http", "h2", "httpupgrade", "splithttp"}
+KNOWN_NETWORKS = {
+    "tcp", "udp", "ws", "grpc", "h2", "http", "xhttp",
+    "httpupgrade", "splithttp", "quic"
+}
 
-def sanitize_string(s):
-    return C1_CTRL_PATTERN.sub("", s)
+DROP_LIMIT = 0.50
+
+
+def sanitize_text(text):
+    return CONTROL_PATTERN.sub("", text)
+
 
 def sanitize_value(value):
     if isinstance(value, str):
-        return sanitize_string(value)
+        return sanitize_text(value)
     if isinstance(value, dict):
         return {k: sanitize_value(v) for k, v in value.items()}
     if isinstance(value, list):
         return [sanitize_value(v) for v in value]
     return value
 
-def is_valid_port(port):
+
+def valid_port(value):
     try:
-        port = int(port)
-        return 1 <= port <= 65535
+        return 1 <= int(value) <= 65535
     except (TypeError, ValueError):
         return False
 
-def is_valid_reality(proxy):
-    """
-    REALITY 节点不尝试猜测/生成 short-id。
-    参数不合法就丢弃整个节点，避免 FLClash 在加载配置时失败。
-    """
+
+def valid_server(value):
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    return bool(value) and not any(ch.isspace() for ch in value)
+
+
+def clean_sni(value, fallback):
+    if not isinstance(value, str):
+        value = ""
+
+    value = sanitize_text(value).strip()
+    if value:
+        value = unquote(value)
+
+        if "://" in value:
+            try:
+                parsed = urlsplit(value)
+                value = parsed.hostname or ""
+            except ValueError:
+                value = ""
+
+        if "/" in value or "?" in value or "#" in value:
+            value = value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+
+    if value and HOST_PATTERN.fullmatch(value):
+        return value.rstrip(".")
+
+    if isinstance(fallback, str):
+        fallback = fallback.strip()
+        if fallback and not any(ch.isspace() for ch in fallback):
+            if HOST_PATTERN.fullmatch(fallback):
+                return fallback.rstrip(".")
+
+    return None
+
+
+def validate_reality(proxy):
     reality = proxy.get("reality-opts")
     if not isinstance(reality, dict):
-        return False, "reality-opts missing"
+        return None, "REALITY reality-opts missing"
+
+    reality = sanitize_value(reality)
 
     public_key = reality.get("public-key")
     if not isinstance(public_key, str) or not public_key.strip():
-        return False, "REALITY public-key missing"
+        return None, "REALITY public-key missing"
+
+    public_key = public_key.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", public_key):
+        return None, "REALITY public-key malformed"
 
     short_id = reality.get("short-id")
 
-    # 有些订阅会使用空 short-id；对 FLClash/Mihomo 兼容性优先，直接丢弃
-    if not isinstance(short_id, str) or not short_id:
-        return False, "invalid REALITY short ID: empty"
+    if short_id is None:
+        return None, "invalid REALITY short ID: missing"
+
+    if not isinstance(short_id, str):
+        return None, "invalid REALITY short ID: non-string"
 
     short_id = short_id.strip()
+    if short_id.lower() in {"", "null", "none", "nil", "undefined"}:
+        return None, "invalid REALITY short ID: empty/null"
 
-    # short-id 必须是十六进制字符串
     if not HEX_PATTERN.fullmatch(short_id):
-        return False, f"invalid REALITY short ID: {short_id!r}"
+        return None, f"invalid REALITY short ID: {short_id!r}"
 
-    # REALITY short-id 应为偶数个十六进制字符，且不超过 16 个字符
-    if len(short_id) % 2 != 0 or len(short_id) > 16:
-        return False, f"invalid REALITY short ID length: {len(short_id)}"
+    if len(short_id) % 2 != 0 or not 2 <= len(short_id) <= 16:
+        return None, f"invalid REALITY short ID length: {len(short_id)}"
 
-    # 标准 short-id 至少应包含一个字节
-    if len(short_id) < 2:
-        return False, "invalid REALITY short ID: too short"
-
-    reality["short-id"] = short_id
-    reality["public-key"] = public_key.strip()
-    return True, ""
-
-def validate_proxy(proxy, index):
-    if not isinstance(proxy, dict):
-        return None, "proxy is not an object"
-
-    proxy = sanitize_value(proxy)
-
-    name = proxy.get("name", f"proxy-{index}")
-    tp = str(proxy.get("type", "")).lower()
-
-    if tp not in VALID_TYPES:
-        return None, f"unsupported/invalid type: {tp!r}"
-
-    server = proxy.get("server")
-    if not isinstance(server, str) or not server.strip():
-        return None, "server missing"
-
-    if not is_valid_port(proxy.get("port")):
-        return None, "invalid port"
-
-    proxy["server"] = server.strip()
-
-    # network 有值时必须合法；不再强行把未知值改成 tcp。
-    net = proxy.get("network")
-    if net is not None:
-        if not isinstance(net, str) or net.lower() not in VALID_NETWORK:
-            return None, f"invalid network: {net!r}"
-        proxy["network"] = net.lower()
-
-    # 不再把可疑 SNI 强制清空；明显非法才丢弃节点。
-    for key in ("sni", "servername"):
-        value = proxy.get(key)
-        if value is not None:
-            if not isinstance(value, str):
-                return None, f"invalid {key}"
-            value = value.strip()
-            if not value or value.startswith(("http://", "https://")) or "%" in value:
-                return None, f"invalid {key}: {value!r}"
-            proxy[key] = value
-
-    # VLESS 必须有 UUID
-    if tp == "vless":
-        uuid = proxy.get("uuid")
-        if not isinstance(uuid, str) or not uuid.strip():
-            return None, "VLESS uuid missing"
-
-        # VLESS + REALITY 专项检查
-        reality = proxy.get("reality-opts")
-        if reality is not None:
-            ok, reason = is_valid_reality(proxy)
-            if not ok:
-                return None, reason
-
-    # VMess / Trojan / SS 等基础必要字段
-    if tp == "vmess":
-        uuid = proxy.get("uuid")
-        if not isinstance(uuid, str) or not uuid.strip():
-            return None, "VMess uuid missing"
-
-    if tp == "trojan":
-        password = proxy.get("password")
-        if not isinstance(password, str) or not password:
-            return None, "Trojan password missing"
-
-    if tp in ("ss", "ssr"):
-        if not isinstance(proxy.get("cipher"), str) or not proxy.get("cipher"):
-            return None, "cipher missing"
-        if not isinstance(proxy.get("password"), str) or not proxy.get("password"):
-            return None, "password missing"
-
-    if tp == "hysteria2":
-        if not isinstance(proxy.get("password"), str) or not proxy.get("password"):
-            return None, "Hysteria2 password missing"
+    reality["public-key"] = public_key
+    reality["short-id"] = short_id.lower()
+    proxy["reality-opts"] = reality
+    proxy["tls"] = True
 
     return proxy, ""
 
+
+def normalize_transport(proxy):
+    network = proxy.get("network")
+    if not isinstance(network, str):
+        return proxy, ""
+
+    network = sanitize_text(network).strip().lower()
+    if not network:
+        proxy.pop("network", None)
+        return proxy, ""
+
+    if network == "raw":
+        network = "tcp"
+
+    if network not in KNOWN_NETWORKS:
+        return None, f"invalid network: {network!r}"
+
+    proxy["network"] = network
+
+    if network == "ws":
+        ws_opts = proxy.get("ws-opts")
+        if not isinstance(ws_opts, dict):
+            ws_opts = {}
+        ws_opts = sanitize_value(ws_opts)
+
+        path = ws_opts.get("path")
+        if not isinstance(path, str) or not path.strip():
+            ws_opts["path"] = "/"
+        else:
+            ws_opts["path"] = path.strip()
+
+        proxy["ws-opts"] = ws_opts
+
+    if network == "grpc":
+        grpc_opts = proxy.get("grpc-opts")
+        if not isinstance(grpc_opts, dict):
+            grpc_opts = {}
+        grpc_opts = sanitize_value(grpc_opts)
+
+        if not grpc_opts.get("serviceName") and grpc_opts.get("grpc-service-name"):
+            grpc_opts["serviceName"] = grpc_opts["grpc-service-name"]
+
+        service_name = grpc_opts.get("serviceName")
+        if not isinstance(service_name, str) or not service_name.strip():
+            return None, "grpc network missing grpc-opts.serviceName"
+
+        grpc_opts["serviceName"] = service_name.strip()
+        proxy["grpc-opts"] = grpc_opts
+
+    return proxy, ""
+
+
+def normalize_sni(proxy):
+    server = proxy.get("server", "")
+    sni = proxy.get("sni")
+    servername = proxy.get("servername")
+
+    cleaned_servername = clean_sni(servername, server)
+    cleaned_sni = clean_sni(sni, cleaned_servername or server)
+    chosen = cleaned_servername or cleaned_sni
+
+    if chosen:
+        if servername is not None:
+            proxy["servername"] = chosen
+        if sni is not None:
+            proxy["sni"] = chosen
+    else:
+        proxy.pop("sni", None)
+        proxy.pop("servername", None)
+
+    return proxy
+
+
+def normalize_proxy(proxy, index):
+    if not isinstance(proxy, dict):
+        return None, "proxy is not a mapping"
+
+    proxy = sanitize_value(proxy)
+
+    name = proxy.get("name")
+    if not isinstance(name, str) or not name.strip():
+        name = f"proxy-{index}"
+    proxy["name"] = name.strip()
+
+    tp = proxy.get("type")
+    if not isinstance(tp, str) or not tp.strip():
+        return None, "missing type"
+    proxy["type"] = tp.strip().lower()
+
+    server = proxy.get("server")
+    if not valid_server(server):
+        return None, "missing/invalid server"
+    proxy["server"] = server.strip()
+
+    if not valid_port(proxy.get("port")):
+        return None, "invalid port"
+    proxy["port"] = int(proxy["port"])
+
+    tp = proxy["type"]
+
+    if tp in {"vless", "vmess"}:
+        if not isinstance(proxy.get("uuid"), str) or not proxy["uuid"].strip():
+            return None, f"{tp} uuid missing"
+        proxy["uuid"] = proxy["uuid"].strip()
+
+    if tp == "trojan":
+        if not isinstance(proxy.get("password"), str) or not proxy["password"]:
+            return None, "trojan password missing"
+
+    if tp in {"ss", "ssr"}:
+        if not isinstance(proxy.get("cipher"), str) or not proxy["cipher"]:
+            return None, f"{tp} cipher missing"
+        if not isinstance(proxy.get("password"), str) or not proxy["password"]:
+            return None, f"{tp} password missing"
+
+    if tp == "hysteria2":
+        if not isinstance(proxy.get("password"), str) or not proxy["password"]:
+            return None, "hysteria2 password missing"
+
+    proxy, reason = normalize_transport(proxy)
+    if proxy is None:
+        return None, reason
+
+    proxy = normalize_sni(proxy)
+
+    if tp == "vless" and "reality-opts" in proxy:
+        proxy, reason = validate_reality(proxy)
+        if proxy is None:
+            return None, reason
+
+    if tp == "vless" and proxy.get("network") == "xhttp":
+        xhttp = proxy.get("xhttp-opts")
+        if xhttp is not None and not isinstance(xhttp, dict):
+            return None, "xhttp-opts is not a mapping"
+
+    return proxy, ""
+
+
+def clean_proxy_groups(data, proxy_names):
+    groups = data.get("proxy-groups")
+    if not isinstance(groups, list):
+        return 0
+
+    group_names = {
+        g.get("name")
+        for g in groups
+        if isinstance(g, dict) and isinstance(g.get("name"), str)
+    }
+
+    allowed = set(proxy_names) | group_names | BUILTIN_POLICIES
+    new_groups = []
+    dropped = 0
+
+    for group in groups:
+        if not isinstance(group, dict):
+            dropped += 1
+            continue
+
+        group = sanitize_value(group)
+        name = group.get("name")
+        if not isinstance(name, str) or not name.strip():
+            dropped += 1
+            continue
+
+        refs = group.get("proxies")
+        if isinstance(refs, list):
+            group["proxies"] = [
+                ref for ref in refs
+                if isinstance(ref, str) and ref in allowed
+            ]
+            if not group["proxies"]:
+                dropped += 1
+                continue
+
+        new_groups.append(group)
+
+    data["proxy-groups"] = new_groups
+    return dropped
+
+
+def clean_rules(data, valid_targets):
+    rules = data.get("rules")
+    if not isinstance(rules, list):
+        return 0
+
+    cleaned = []
+    dropped = 0
+
+    for rule in rules:
+        if not isinstance(rule, str):
+            dropped += 1
+            continue
+
+        rule = sanitize_text(rule).strip()
+        if not rule:
+            dropped += 1
+            continue
+
+        parts = rule.split(",")
+        if len(parts) >= 2:
+            target = parts[-1].strip()
+            if target and target not in valid_targets and target not in BUILTIN_POLICIES:
+                dropped += 1
+                continue
+
+        cleaned.append(rule)
+
+    data["rules"] = cleaned
+    return dropped
+
+
 def main():
     try:
-        with open(SOURCE_FILE, "r", encoding="utf-8") as f:
-            raw_data = yaml.safe_load(f)
+        with open(SOURCE_FILE, "rb") as f:
+            raw_bytes = f.read()
+
+        raw_text = raw_bytes.decode("utf-8", errors="replace")
+        sanitized_text = sanitize_text(raw_text)
+        data = yaml.safe_load(sanitized_text)
     except Exception as e:
         print(f"[FATAL] source YAML parse failed: {e}")
         sys.exit(1)
 
-    if not isinstance(raw_data, dict):
-        print("[FATAL] source YAML root is not an object")
+    if not isinstance(data, dict):
+        print("[FATAL] source YAML root is not a mapping")
         sys.exit(1)
 
-    proxies = raw_data.get("proxies")
+    proxies = data.get("proxies")
     if not isinstance(proxies, list):
-        print("[FATAL] proxies is missing or not a list")
+        print("[FATAL] source YAML has no proxies list")
         sys.exit(1)
 
-    fixed_proxies = []
+    fixed = []
     dropped = []
+    names = set()
 
     for index, proxy in enumerate(proxies, 1):
-        fixed, reason = validate_proxy(proxy, index)
-        if fixed is None:
-            name = proxy.get("name", f"proxy-{index}") if isinstance(proxy, dict) else f"proxy-{index}"
+        normalized, reason = normalize_proxy(proxy, index)
+
+        if normalized is None:
+            name = (
+                proxy.get("name", f"proxy-{index}")
+                if isinstance(proxy, dict)
+                else f"proxy-{index}"
+            )
             dropped.append((index, name, reason))
             print(f"[DROP] proxy {index}: {name}: {reason}")
-        else:
-            fixed_proxies.append(fixed)
+            continue
 
-    if not fixed_proxies:
-        print("[FATAL] all proxies were rejected; refusing to overwrite output")
+        name = normalized["name"]
+        if name in names:
+            dropped.append((index, name, "duplicate proxy name"))
+            print(f"[DROP] proxy {index}: {name}: duplicate proxy name")
+            continue
+
+        names.add(name)
+        fixed.append(normalized)
+
+    if not fixed:
+        print("[FATAL] no valid proxies remain")
         sys.exit(1)
 
-    # 上游异常保护：如果超过 80% 节点被清除，拒绝生成/提交新配置。
-    drop_ratio = len(dropped) / len(proxies) if proxies else 1
-    if proxies and drop_ratio > 0.80:
+    drop_ratio = len(dropped) / len(proxies)
+    if drop_ratio > DROP_LIMIT:
         print(
-            f"[FATAL] too many proxies dropped: "
-            f"{len(dropped)}/{len(proxies)} ({drop_ratio:.1%}); "
-            "refusing to generate output"
+            f"[FATAL] {len(dropped)}/{len(proxies)} proxies dropped "
+            f"({drop_ratio:.1%}); refusing to publish"
         )
         sys.exit(1)
 
-    raw_data["proxies"] = fixed_proxies
+    data["proxies"] = fixed
 
-    # 写入后立即重新解析，作为第二道 YAML 结构检查。
+    group_dropped = clean_proxy_groups(data, names)
+
+    group_names = {
+        g.get("name")
+        for g in data.get("proxy-groups", [])
+        if isinstance(g, dict) and isinstance(g.get("name"), str)
+    }
+    rule_targets = names | group_names
+    rule_dropped = clean_rules(data, rule_targets)
+
     try:
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        with open(OUTPUT_FILE, "w", encoding="utf-8", newline="\n") as f:
             yaml.safe_dump(
-                raw_data,
+                data,
                 f,
                 allow_unicode=True,
                 sort_keys=False,
-                default_flow_style=False
+                default_flow_style=False,
+                width=4096,
             )
 
         with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
             final_data = yaml.safe_load(f)
 
-        if not isinstance(final_data, dict) or not isinstance(final_data.get("proxies"), list):
-            raise ValueError("output YAML structure invalid")
+        if not isinstance(final_data, dict):
+            raise ValueError("output root is not a mapping")
+        if not isinstance(final_data.get("proxies"), list):
+            raise ValueError("output proxies is not a list")
+        if not final_data["proxies"]:
+            raise ValueError("output proxies is empty")
+
+        with open(OUTPUT_FILE, "rb") as f:
+            final_text = f.read().decode("utf-8", errors="replace")
+        if CONTROL_PATTERN.search(final_text):
+            raise ValueError("output still contains YAML control bytes")
 
     except Exception as e:
         print(f"[FATAL] output validation failed: {e}")
@@ -216,11 +438,14 @@ def main():
 
     print("")
     print("========== CLEAN SUMMARY ==========")
-    print(f"Source proxies : {len(proxies)}")
-    print(f"Valid proxies  : {len(fixed_proxies)}")
-    print(f"Dropped proxies: {len(dropped)}")
-    print(f"Output         : {OUTPUT_FILE}")
+    print(f"Source proxies       : {len(proxies)}")
+    print(f"Valid proxies        : {len(fixed)}")
+    print(f"Dropped proxies      : {len(dropped)}")
+    print(f"Removed proxy groups : {group_dropped}")
+    print(f"Removed rules        : {rule_dropped}")
+    print(f"Output               : {OUTPUT_FILE}")
     print("====================================")
+
 
 if __name__ == "__main__":
     main()
