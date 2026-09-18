@@ -10,7 +10,30 @@ CONFIG = (BASE_DIR / (sys.argv[1] if len(sys.argv) > 1 else "clash_fixed.yaml"))
 MIHOMO = (BASE_DIR / (sys.argv[2] if len(sys.argv) > 2 else "mihomo")).resolve()
 MAX_REPAIRS = 500
 PROXY_ERROR = re.compile(r"proxy\s+(\d+)\s*:\s*(.+)", re.IGNORECASE)
-BUILTINS = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "BLOCK", "GLOBAL", "SYSTEM"}
+
+BUILTINS = {
+    "DIRECT", "REJECT", "REJECT-DROP", "PASS",
+    "COMPATIBLE", "BLOCK", "GLOBAL", "SYSTEM",
+}
+
+RULE_TARGET_AT_2 = {
+    "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-WILDCARD",
+    "DOMAIN-REGEX", "GEOSITE", "GEOIP", "IP-CIDR", "IP-CIDR6",
+    "IP-SUFFIX", "IP-ASN", "SRC-GEOIP", "SRC-IP-ASN", "SRC-IP-CIDR",
+    "SRC-IP-SUFFIX", "DST-PORT", "SRC-PORT", "IN-PORT", "IN-TYPE",
+    "IN-USER", "IN-NAME", "REMATCH-NAME", "PROCESS-PATH",
+    "PROCESS-PATH-WILDCARD", "PROCESS-PATH-REGEX", "PROCESS-NAME",
+    "PROCESS-NAME-WILDCARD", "PROCESS-NAME-REGEX", "UID", "NETWORK",
+    "DSCP", "RULE-SET", "AND", "OR", "NOT", "SUB-RULE",
+}
+RULE_TARGET_AT_1 = {"MATCH"}
+
+DYNAMIC_GROUP_FIELDS = {
+    "include-all",
+    "include-all-proxies",
+    "include-all-providers",
+    "use",
+}
 
 
 def run_test():
@@ -33,38 +56,168 @@ def load_config():
     return data
 
 
-def prune_references(data):
-    names = {p.get("name") for p in data.get("proxies", []) if isinstance(p, dict)}
-    groups = data.get("proxy-groups", [])
-    if isinstance(groups, list):
-        group_names = {g.get("name") for g in groups if isinstance(g, dict)}
-        allowed = names | group_names | BUILTINS
-        new_groups = []
-        for g in groups:
-            if not isinstance(g, dict):
-                continue
-            refs = g.get("proxies")
-            if isinstance(refs, list):
-                g["proxies"] = [x for x in refs if x in allowed]
-                if not g["proxies"]:
-                    continue
-            new_groups.append(g)
-        data["proxy-groups"] = new_groups
+def split_rule_fields(rule):
+    """Split a Mihomo rule on top-level commas only."""
+    fields = []
+    current = []
+    depth = 0
+    quote = None
+    escaped = False
 
-        group_names = {g.get("name") for g in new_groups if isinstance(g, dict)}
-        allowed = names | group_names | BUILTINS
-        rules = data.get("rules")
-        if isinstance(rules, list):
-            cleaned = []
-            for rule in rules:
-                if not isinstance(rule, str):
+    for ch in rule:
+        if escaped:
+            current.append(ch)
+            escaped = False
+            continue
+
+        if quote is not None:
+            current.append(ch)
+            if ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+        elif ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            if depth > 0:
+                depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            fields.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+
+    fields.append("".join(current).strip())
+    return fields
+
+
+def rule_target(rule):
+    """Return the routing target without mistaking no-resolve/src for it."""
+    if not isinstance(rule, str):
+        return None, False
+
+    fields = split_rule_fields(rule)
+    if not fields:
+        return None, False
+
+    rule_type = fields[0].strip().upper()
+
+    if rule_type in RULE_TARGET_AT_1:
+        return (fields[1], True) if len(fields) >= 2 and fields[1] else (None, False)
+
+    if rule_type in RULE_TARGET_AT_2:
+        return (fields[2], True) if len(fields) >= 3 and fields[2] else (None, False)
+
+    # Unknown/custom syntax: do not guess; let Mihomo validate it.
+    return None, False
+
+
+def prune_references(data):
+    """Remove references to deleted proxies without corrupting valid syntax."""
+    proxies = data.get("proxies", [])
+    names = {
+        p.get("name")
+        for p in proxies
+        if isinstance(p, dict) and isinstance(p.get("name"), str) and p.get("name")
+    }
+
+    groups = data.get("proxy-groups", [])
+    if not isinstance(groups, list):
+        groups = []
+
+    new_groups = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+
+        refs = group.get("proxies")
+        if isinstance(refs, list):
+            group["proxies"] = [
+                x for x in refs
+                if isinstance(x, str) and x in (names | BUILTINS)
+            ]
+
+        has_dynamic_members = any(
+            bool(group.get(field)) for field in DYNAMIC_GROUP_FIELDS
+        )
+
+        if isinstance(refs, list) and not group["proxies"] and not has_dynamic_members:
+            continue
+
+        new_groups.append(group)
+
+    changed = True
+    while changed:
+        changed = False
+        current_names = {
+            g.get("name")
+            for g in new_groups
+            if isinstance(g, dict) and isinstance(g.get("name"), str) and g.get("name")
+        }
+        allowed = names | current_names | BUILTINS
+
+        kept = []
+        for group in new_groups:
+            refs = group.get("proxies")
+            if isinstance(refs, list):
+                filtered = [
+                    x for x in refs
+                    if isinstance(x, str) and x in allowed
+                ]
+                if filtered != refs:
+                    group["proxies"] = filtered
+                    changed = True
+
+                has_dynamic_members = any(
+                    bool(group.get(field)) for field in DYNAMIC_GROUP_FIELDS
+                )
+                if not filtered and not has_dynamic_members:
+                    changed = True
                     continue
-                parts = rule.split(",")
-                target = parts[-1].strip() if len(parts) >= 2 else ""
-                if target and target not in allowed:
-                    continue
-                cleaned.append(rule)
-            data["rules"] = cleaned
+
+            kept.append(group)
+
+        new_groups = kept
+
+    data["proxy-groups"] = new_groups
+
+    group_names = {
+        g.get("name")
+        for g in new_groups
+        if isinstance(g, dict) and isinstance(g.get("name"), str) and g.get("name")
+    }
+    allowed = names | group_names | BUILTINS
+
+    rules = data.get("rules")
+    if isinstance(rules, list):
+        cleaned_rules = []
+        for rule in rules:
+            if not isinstance(rule, str):
+                continue
+
+            target, has_target = rule_target(rule)
+
+            if has_target and target not in allowed:
+                continue
+
+            cleaned_rules.append(rule)
+
+        data["rules"] = cleaned_rules
+
+    # dialer-proxy can also reference a proxy or proxy-group.
+    for proxy in proxies:
+        if not isinstance(proxy, dict):
+            continue
+        dialer = proxy.get("dialer-proxy")
+        if isinstance(dialer, str) and dialer not in allowed:
+            proxy.pop("dialer-proxy", None)
 
 
 def save_config(data):
