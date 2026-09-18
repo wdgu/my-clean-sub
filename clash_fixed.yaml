@@ -12957,20 +12957,6 @@ proxies:
   uuid: b09dfed1-90fa-4353-8bdf-de1edb2e2d79
   ws-opts:
     path: /
-- client-fingerprint: firefox
-  flow: xtls-rprx-vision
-  name: vless-1366457601
-  network: tcp
-  port: 443
-  reality-opts:
-    public-key: f9DtsV6_ncVM9DmGEmImcR3YKSWGimoS2MXHnIWOyH0
-    short-id: 0195
-  server: 1-sg.ap.ku-ke.cc
-  servername: cdn.jsdelivr.net
-  tls: true
-  type: vless
-  udp: true
-  uuid: d03c34c3-98fa-42ff-80a8-6ea1d0b24ac9
 - client-fingerprint: safari
   flow: xtls-rprx-vision
   name: vless-1123846741
@@ -17011,7 +16997,6 @@ proxy-groups:
   - vless-1310689345
   - vless-1355328062
   - vless-1342827147
-  - vless-1366457601
   - vless-1123846741
   - vless-1258578720
   - vless-1268263932
@@ -18508,7 +18493,6 @@ proxy-groups:
   - vless-1310689345
   - vless-1355328062
   - vless-1342827147
-  - vless-1366457601
   - vless-1123846741
   - vless-1258578720
   - vless-1268263932
