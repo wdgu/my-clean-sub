@@ -28,43 +28,67 @@ jobs:
       - name: Download source clash.yaml
         run: |
           set -euo pipefail
-          curl -fL --retry 4 --retry-delay 3 --connect-timeout 15 --max-time 180 \
-            -o source.yaml \
-            "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
+          curl -fL --retry 4 --retry-delay 3 --connect-timeout 15 --max-time 180             -o source.yaml             "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
           test -s source.yaml
           python3 - <<'PY'
+          import re
           import yaml
-          with open("source.yaml", "r", encoding="utf-8") as f:
-              data = yaml.safe_load(f)
+
+          CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]")
+
+          with open("source.yaml", "rb") as f:
+              text = f.read().decode("utf-8", errors="replace")
+
+          text = CONTROL_PATTERN.sub("", text)
+          data = yaml.safe_load(text)
+
           if not isinstance(data, dict) or not isinstance(data.get("proxies"), list):
               raise SystemExit("source.yaml is not a valid Clash YAML with a proxies list")
+
           print(f"Downloaded source proxies: {len(data['proxies'])}")
           PY
 
-      - name: Run clean script
+      - name: Run rebuilt cleaner
         run: |
           set -euo pipefail
           python3 clean.py
           test -s clash_fixed.yaml
 
-      - name: Final YAML validation
+      - name: Final structural validation
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import re
           import yaml
 
-          with open("clash_fixed.yaml", "r", encoding="utf-8") as f:
-              data = yaml.safe_load(f)
+          CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]")
 
+          with open("clash_fixed.yaml", "rb") as f:
+              text = f.read().decode("utf-8", errors="replace")
+
+          if CONTROL_PATTERN.search(text):
+              raise SystemExit("output contains forbidden YAML control characters")
+
+          data = yaml.safe_load(text)
           proxies = data.get("proxies") if isinstance(data, dict) else None
+
           if not isinstance(proxies, list) or not proxies:
               raise SystemExit("clash_fixed.yaml has no valid proxies")
 
+          names = set()
           for i, proxy in enumerate(proxies, 1):
               if not isinstance(proxy, dict):
                   raise SystemExit(f"proxy {i} is not a mapping")
+              name = proxy.get("name")
+              if not isinstance(name, str) or not name:
+                  raise SystemExit(f"proxy {i} has no name")
+              if name in names:
+                  raise SystemExit(f"duplicate proxy name: {name}")
+              names.add(name)
 
           print(f"Final proxies: {len(proxies)}")
+          print(f"Final proxy groups: {len(data.get('proxy-groups', []))}")
+          print(f"Final rules: {len(data.get('rules', []))}")
           PY
 
       - name: Commit & push cleaned file
