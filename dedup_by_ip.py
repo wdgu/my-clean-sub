@@ -189,10 +189,12 @@ def main():
             "fingerprint": fingerprint(proxy),
         })
 
-    # Only compare nodes for which a successful egress-IP observation exists.
+    # Compare nodes for which a successful egress-IP observation exists.
+    # ip_test.py records status="success" but does not set ip_stable=True.
+    # Requiring ip_stable here would silently disable all IP grouping.
     by_ip = defaultdict(list)
     for node in nodes:
-        if node["egress_ip"] and node.get("ip_stable") is True:
+        if node["egress_ip"]:
             by_ip[node["egress_ip"]].append(node)
 
     remove = set()
