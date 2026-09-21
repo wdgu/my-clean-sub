@@ -10,6 +10,7 @@ permissions:
 jobs:
   run_clean:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           MIHOMO_VERSION="v1.19.31"
-          MIHOMO_FILE="mihomo-linux-amd64-v1-${MIHOMO_VERSION}.gz"
+          MIHOMO_FILE="mihomo-linux-amd64-${MIHOMO_VERSION}.gz"
           MIHOMO_SHA256="d4304c546c3cddcb6fafd4b4fddb0ba1a95ffa36606fda56d75db2e59ad24114"
           curl -fL --retry 4 --retry-delay 3 --connect-timeout 15 --max-time 180             -o mihomo.gz             "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${MIHOMO_FILE}"
           echo "${MIHOMO_SHA256}  mihomo.gz" | sha256sum -c -
@@ -65,6 +66,29 @@ jobs:
         run: |
           set -euo pipefail
           python3 validate_mihomo.py clash_fixed.yaml ./mihomo
+          test -s clash_fixed.yaml
+
+      - name: Test nodes and collect stable egress IPs
+        run: |
+          set -euo pipefail
+          python3 ip_test.py
+          test -s test_results.json
+
+      - name: Remove only strongly suspected duplicate nodes
+        run: |
+          set -euo pipefail
+          python3 dedup_by_ip.py \
+            --config clash_fixed.yaml \
+            --results test_results.json \
+            --output clash_dedup.yaml \
+            --report dedup_report.json
+          test -s clash_dedup.yaml
+
+      - name: Validate deduplicated config
+        run: |
+          set -euo pipefail
+          python3 validate_mihomo.py clash_dedup.yaml ./mihomo
+          mv clash_dedup.yaml clash_fixed.yaml
           test -s clash_fixed.yaml
 
       - name: Final structural validation
@@ -96,6 +120,18 @@ jobs:
           print(f"Final proxy groups: {len(data.get('proxy-groups', []))}")
           print(f"Final rules: {len(data.get('rules', []))}")
           PY
+
+      - name: Save test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clash-test-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            test_results.json
+            dedup_report.json
+            ip_test.log
+            ip_test_config.yaml
+            clean_report.json
 
       - name: Commit & push cleaned file
         run: |
