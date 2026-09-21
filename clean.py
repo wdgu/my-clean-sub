@@ -27,6 +27,8 @@ KNOWN_NETWORKS = {
 }
 
 DROP_LIMIT = 0.50
+# Duplicate configurations are expected cleanup and do not count toward the
+# corruption-safety threshold. Only genuinely invalid nodes are protected by it.
 
 IDENTITY_IGNORED_FIELDS = {
     "name", "icon", "udp", "tfo", "mptcp", "smux",
@@ -431,11 +433,22 @@ def main():
         print("[FATAL] no valid proxies remain")
         sys.exit(1)
 
-    drop_ratio = len(dropped) / len(proxies)
-    if drop_ratio > DROP_LIMIT:
+    duplicate_drops = sum(
+        1 for _, _, reason in dropped
+        if reason.startswith("duplicate node configuration")
+        or reason == "duplicate proxy name"
+    )
+    invalid_drops = len(dropped) - duplicate_drops
+    invalid_drop_ratio = invalid_drops / len(proxies)
+
+    if invalid_drop_ratio > DROP_LIMIT:
         print(
-            f"[FATAL] {len(dropped)}/{len(proxies)} proxies dropped "
-            f"({drop_ratio:.1%}); refusing to publish"
+            f"[FATAL] {invalid_drops}/{len(proxies)} genuinely invalid proxies "
+            f"dropped ({invalid_drop_ratio:.1%}); refusing to publish"
+        )
+        print(
+            f"[INFO] Duplicate cleanup excluded from safety threshold: "
+            f"{duplicate_drops} nodes"
         )
         sys.exit(1)
 
@@ -486,12 +499,18 @@ def main():
     print(f"Source proxies       : {len(proxies)}")
     print(f"Valid proxies        : {len(fixed)}")
     print(f"Dropped proxies      : {len(dropped)}")
+    print(f"Duplicate drops      : {duplicate_drops}")
+    print(f"Invalid drops        : {invalid_drops}")
+    print(f"Invalid drop ratio   : {invalid_drop_ratio:.1%}")
     print(f"Removed proxy groups : {group_dropped}")
     print(f"Removed rules        : {rule_dropped}")
     report = {
         "source_proxies": len(proxies),
         "valid_proxies": len(fixed),
         "dropped_proxies": len(dropped),
+        "duplicate_drops": duplicate_drops,
+        "invalid_drops": invalid_drops,
+        "invalid_drop_ratio": invalid_drop_ratio,
         "duplicate_node_groups": list(duplicate_groups.values()),
         "duplicate_node_group_count": len(duplicate_groups),
         "removed_proxy_groups": group_dropped,
