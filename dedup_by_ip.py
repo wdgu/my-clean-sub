@@ -255,9 +255,18 @@ def main():
         if decision.get("action") == "remove":
             replacements[decision["name"]] = decision["keep"]
 
+    def resolve_replacement(name):
+        # A -> B -> C can happen when several nodes in one IP group are
+        # removed in sequence. Always resolve to the final surviving node.
+        seen = set()
+        while name in replacements and name not in seen:
+            seen.add(name)
+            name = replacements[name]
+        return name
+
     def rewrite_refs(value):
         if isinstance(value, str):
-            return replacements.get(value, value)
+            return resolve_replacement(value)
         if isinstance(value, list):
             return [rewrite_refs(item) for item in value]
         if isinstance(value, dict):
