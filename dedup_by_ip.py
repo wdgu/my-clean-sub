@@ -269,6 +269,65 @@ def main():
         return value
 
     data = rewrite_refs(data)
+
+    # Safety net: never publish a config containing a proxy-group/rule
+    # reference to a removed proxy. If a reference survived the rewrite for
+    # any reason, restore that proxy instead of producing a broken config.
+    original_proxies = {
+        proxy.get("name"): proxy
+        for proxy in data["proxies"]
+        if isinstance(proxy, dict) and isinstance(proxy.get("name"), str)
+    }
+    surviving_names = set(original_proxies)
+    referenced_names = set()
+
+    def collect_refs(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "proxies" and isinstance(item, list):
+                    for name in item:
+                        if isinstance(name, str):
+                            referenced_names.add(name)
+                elif key == "rules" and isinstance(item, list):
+                    for rule in item:
+                        if isinstance(rule, str):
+                            parts = rule.split(",")
+                            if parts:
+                                target = parts[-1].strip()
+                                if target in surviving_names:
+                                    referenced_names.add(target)
+                else:
+                    collect_refs(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect_refs(item)
+
+    collect_refs(data.get("proxy-groups", []))
+    collect_refs(data.get("rules", []))
+
+    # Map removed proxy names to their original proxy definitions. If any
+    # reference still points at one, cancel that deletion.
+    restored = set()
+    for name in referenced_names:
+        if name in replacements and name not in surviving_names:
+            # The reference should normally already have been rewritten.
+            # Keeping the original node is safer than publishing a broken
+            # configuration if a non-standard structure escaped rewriting.
+            for node in nodes:
+                if node["name"] == name:
+                    remove.discard(node["index"])
+                    restored.add(name)
+                    break
+
+    if restored:
+        # Re-run the rewrite after restoring protected nodes; references to
+        # nodes that are actually removed must always point to a survivor.
+        protected_replacements = {
+            old: new for old, new in replacements.items() if old not in restored
+        }
+        replacements = protected_replacements
+        data = rewrite_refs(data)
+
     output_proxies = [
         proxy for index, proxy in enumerate(data["proxies"])
         if index not in remove
