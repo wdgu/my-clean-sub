@@ -75,7 +75,6 @@ def build_test_config(data):
     })
     cfg["proxy-groups"] = groups
 
-    # Prevent the test instance from modifying the repository's main config.
     cfg.pop("external-ui", None)
     cfg.pop("external-ui-url", None)
     cfg.pop("tun", None)
@@ -86,6 +85,24 @@ def build_test_config(data):
             cfg, f, allow_unicode=True, sort_keys=False,
             default_flow_style=False, width=4096
         )
+
+
+def proxy_get_ip():
+    p = subprocess.run(
+        [
+            "curl", "-4", "-fsS",
+            "--proxy", f"http://127.0.0.1:{MIXED_PORT}",
+            "--max-time", "10",
+            IP_URL,
+        ],
+        capture_output=True, text=True, timeout=15,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr.strip() or f"curl exit {p.returncode}")
+    ip = p.stdout.strip()
+    if not ip:
+        raise RuntimeError("empty IP response")
+    return ip
 
 
 def main():
@@ -107,9 +124,9 @@ def main():
     try:
         wait_api()
 
-        # Mihomo can health-check all members of a strategy group in one API
-        # request. We use two independent 204 endpoints; one success is enough
-        # to make a node an IP-testing candidate.
+        # First stage: test all nodes through Mihomo's group-delay endpoint.
+        # A node only becomes an IP candidate after succeeding on at least
+        # one of two independent 204 endpoints.
         delay_by_name = {}
         for url, expected in TEST_URLS:
             path = "/group/" + quote(TEST_GROUP, safe="") + "/delay?" + urlencode({
@@ -125,7 +142,7 @@ def main():
                             delay = int(delay)
                         except (TypeError, ValueError):
                             continue
-                        if delay > 0 and delay < 65535:
+                        if 0 < delay < 65535:
                             old = delay_by_name.get(name)
                             delay_by_name[name] = delay if old is None else min(old, delay)
             except Exception as exc:
@@ -152,11 +169,12 @@ def main():
                 "type": proxy.get("type", ""),
                 "delay_ms": delay_by_name[name],
                 "egress_ip": "",
+                "egress_ips": [],
+                "ip_stable": False,
                 "status": "ip_failed",
             }
 
             try:
-                # Select this node in the dedicated selector group.
                 api_request(
                     "/proxies/" + quote(TEST_GROUP, safe=""),
                     method="PUT",
@@ -164,34 +182,27 @@ def main():
                     timeout=10,
                 )
 
-                req = Request(IP_URL)
-                req.add_header("User-Agent", "mihomo-ip-test/1.0")
-                with urlopen(
-                    Request(
-                        IP_URL,
-                        headers={"User-Agent": "mihomo-ip-test/1.0"},
-                    ),
-                    timeout=8,
-                ) as direct:
-                    direct_ip = direct.read().decode().strip()
+                # Two independent requests through the same selected node.
+                ips = []
+                for _ in range(2):
+                    try:
+                        ips.append(proxy_get_ip())
+                    except Exception:
+                        pass
 
-                # The actual proxy request is made by curl so the selected
-                # Mihomo mixed port is explicitly used.
-                p = subprocess.run(
-                    [
-                        "curl", "-4", "-fsS",
-                        "--proxy", f"http://127.0.0.1:{MIXED_PORT}",
-                        "--max-time", "10",
-                        IP_URL,
-                    ],
-                    capture_output=True, text=True, timeout=15,
-                )
-                if p.returncode == 0:
-                    ip = p.stdout.strip()
-                    if ip:
-                        record["egress_ip"] = ip
-                        record["status"] = "success"
-                        record["direct_ip"] = direct_ip
+                record["egress_ips"] = ips
+                if len(ips) == 2 and ips[0] == ips[1]:
+                    record["egress_ip"] = ips[0]
+                    record["ip_stable"] = True
+                    record["status"] = "success"
+                elif len(ips) == 1:
+                    # Keep a single successful observation as metadata, but
+                    # mark it unstable/insufficient for automatic dedup.
+                    record["egress_ip"] = ips[0]
+                    record["status"] = "ip_single_observation"
+                elif len(ips) == 2:
+                    record["status"] = "ip_changed"
+
             except Exception as exc:
                 record["error"] = str(exc)
 
@@ -203,15 +214,12 @@ def main():
             )
 
         RESULTS.write_text(
-            json.dumps(
-                {"results": results},
-                ensure_ascii=False, indent=2
-            ) + "\n",
+            json.dumps({"results": results}, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
 
         success = sum(1 for r in results if r["status"] == "success")
-        print(f"Successful egress IP tests: {success}/{len(results)}")
+        print(f"Stable egress IP tests: {success}/{len(results)}")
 
     finally:
         proc.terminate()
