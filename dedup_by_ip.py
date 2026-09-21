@@ -16,7 +16,9 @@ or
   {"proxy": "...", "ip": "...", ...}
 
 The script only removes a node when there is strong evidence that another
-node is the same effective route:
+node is the same effective route. References to removed nodes are rewritten
+to the node that was kept, so Mihomo proxy groups/rules cannot point at a
+nonexistent proxy.
   - same observed egress IP
   - same server + port
   - same protocol/type
@@ -245,6 +247,28 @@ def main():
                 "reasons": reasons,
             })
 
+    # Build a replacement map before removing nodes. Mihomo proxy-groups can
+    # contain concrete proxy names, so deleting a proxy without rewriting
+    # those references produces an invalid config.
+    replacements = {}
+    for decision in decisions:
+        if decision.get("action") == "remove":
+            replacements[decision["name"]] = decision["keep"]
+
+    def rewrite_refs(value):
+        if isinstance(value, str):
+            return replacements.get(value, value)
+        if isinstance(value, list):
+            return [rewrite_refs(item) for item in value]
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                # A proxy/group's own name is metadata, not a reference.
+                out[k] = v if k == "name" else rewrite_refs(v)
+            return out
+        return value
+
+    data = rewrite_refs(data)
     output_proxies = [
         proxy for index, proxy in enumerate(data["proxies"])
         if index not in remove
@@ -270,6 +294,8 @@ def main():
             "removed_proxies": len(remove),
             "min_score": args.min_score,
             "decisions": decisions,
+            "replacements": replacements,
+            "rewritten_references": len(replacements),
             "output": args.output,
             "note": (
                 "Same egress IP alone never causes deletion. "
@@ -289,6 +315,7 @@ def main():
     print(f"IP groups with multiple nodes : {sum(1 for g in by_ip.values() if len(g) > 1)}")
     print(f"Removed possible duplicates   : {len(remove)}")
     print(f"Output proxies                : {len(output_proxies)}")
+    print(f"Rewritten proxy references    : {len(replacements)}")
     print(f"Minimum evidence score        : {args.min_score}")
     print(f"Output                        : {args.output}")
     print(f"Report                        : {args.report}")
