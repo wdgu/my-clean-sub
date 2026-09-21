@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           MIHOMO_VERSION="v1.19.31"
-          MIHOMO_FILE="mihomo-linux-amd64-${MIHOMO_VERSION}.gz"
+          MIHOMO_FILE="mihomo-linux-amd64-v1-${MIHOMO_VERSION}.gz"
           MIHOMO_SHA256="d4304c546c3cddcb6fafd4b4fddb0ba1a95ffa36606fda56d75db2e59ad24114"
           curl -fL --retry 4 --retry-delay 3 --connect-timeout 15 --max-time 180             -o mihomo.gz             "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${MIHOMO_FILE}"
           echo "${MIHOMO_SHA256}  mihomo.gz" | sha256sum -c -
