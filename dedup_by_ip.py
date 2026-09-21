@@ -192,7 +192,7 @@ def main():
     # Only compare nodes for which a successful egress-IP observation exists.
     by_ip = defaultdict(list)
     for node in nodes:
-        if node["egress_ip"]:
+        if node["egress_ip"] and node.get("ip_stable") is True:
             by_ip[node["egress_ip"]].append(node)
 
     remove = set()
