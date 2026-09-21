@@ -1,7 +1,6 @@
 import json
 import re
 import sys
-import hashlib
 from urllib.parse import unquote, urlsplit
 
 import yaml
@@ -29,32 +28,6 @@ KNOWN_NETWORKS = {
 DROP_LIMIT = 0.50
 # Duplicate configurations are expected cleanup and do not count toward the
 # corruption-safety threshold. Only genuinely invalid nodes are protected by it.
-
-IDENTITY_IGNORED_FIELDS = {
-    "name", "icon", "udp", "tfo", "mptcp", "smux",
-    "interface-name", "routing-mark", "ip-version",
-}
-
-
-def canonicalize(value):
-    if isinstance(value, dict):
-        return {
-            k: canonicalize(v)
-            for k, v in sorted(value.items())
-            if k not in IDENTITY_IGNORED_FIELDS
-        }
-    if isinstance(value, list):
-        return [canonicalize(v) for v in value]
-    if isinstance(value, str):
-        return value.strip()
-    return value
-
-
-def node_fingerprint(proxy):
-    identity = canonicalize(proxy)
-    raw = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
 
 def sanitize_text(text):
     return CONTROL_PATTERN.sub("", text)
@@ -388,8 +361,6 @@ def main():
 
     fixed = []
     dropped = []
-    duplicate_groups = {}
-    fingerprints = {}
     names = set()
 
     for index, proxy in enumerate(proxies, 1):
@@ -405,50 +376,23 @@ def main():
             print(f"[DROP] proxy {index}: {name}: {reason}")
             continue
 
-        name = normalized["name"]
-        fingerprint = node_fingerprint(normalized)
-        if fingerprint in fingerprints:
-            first_name = fingerprints[fingerprint]["name"]
-            duplicate_groups.setdefault(fingerprint, [first_name]).append(name)
-            dropped.append((index, name, f"duplicate node configuration; same as {first_name}"))
-            print(f"[DROP] proxy {index}: {name}: duplicate node configuration; same as {first_name}")
-            continue
-
-        fingerprints[fingerprint] = {
-            "name": name,
-            "server": normalized.get("server"),
-            "port": normalized.get("port"),
-            "type": normalized.get("type"),
-        }
-
-        if name in names:
-            dropped.append((index, name, "duplicate proxy name"))
-            print(f"[DROP] proxy {index}: {name}: duplicate proxy name")
-            continue
-
-        names.add(name)
+        # Format/protocol repair only:
+        # keep every otherwise-valid node. Do not deduplicate by IP,
+        # server/port, effective configuration, or proxy name.
+        names.add(normalized["name"])
         fixed.append(normalized)
 
     if not fixed:
         print("[FATAL] no valid proxies remain")
         sys.exit(1)
 
-    duplicate_drops = sum(
-        1 for _, _, reason in dropped
-        if reason.startswith("duplicate node configuration")
-        or reason == "duplicate proxy name"
-    )
-    invalid_drops = len(dropped) - duplicate_drops
+    invalid_drops = len(dropped)
     invalid_drop_ratio = invalid_drops / len(proxies)
 
     if invalid_drop_ratio > DROP_LIMIT:
         print(
             f"[FATAL] {invalid_drops}/{len(proxies)} genuinely invalid proxies "
             f"dropped ({invalid_drop_ratio:.1%}); refusing to publish"
-        )
-        print(
-            f"[INFO] Duplicate cleanup excluded from safety threshold: "
-            f"{duplicate_drops} nodes"
         )
         sys.exit(1)
 
@@ -499,7 +443,6 @@ def main():
     print(f"Source proxies       : {len(proxies)}")
     print(f"Valid proxies        : {len(fixed)}")
     print(f"Dropped proxies      : {len(dropped)}")
-    print(f"Duplicate drops      : {duplicate_drops}")
     print(f"Invalid drops        : {invalid_drops}")
     print(f"Invalid drop ratio   : {invalid_drop_ratio:.1%}")
     print(f"Removed proxy groups : {group_dropped}")
@@ -508,11 +451,8 @@ def main():
         "source_proxies": len(proxies),
         "valid_proxies": len(fixed),
         "dropped_proxies": len(dropped),
-        "duplicate_drops": duplicate_drops,
         "invalid_drops": invalid_drops,
         "invalid_drop_ratio": invalid_drop_ratio,
-        "duplicate_node_groups": list(duplicate_groups.values()),
-        "duplicate_node_group_count": len(duplicate_groups),
         "removed_proxy_groups": group_dropped,
         "removed_rules": rule_dropped,
         "output": OUTPUT_FILE,
@@ -521,7 +461,6 @@ def main():
         json.dump(report, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
-    print(f"Duplicate node groups : {len(duplicate_groups)}")
     print(f"Report                : {REPORT_FILE}")
     print(f"Output                : {OUTPUT_FILE}")
     print("====================================")
