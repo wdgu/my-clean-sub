@@ -1,6 +1,9 @@
 name: Clean Clash Sub
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/clean.yml'
   schedule:
     - cron: '0 */4 * * *'
 
@@ -68,29 +71,6 @@ jobs:
           python3 validate_mihomo.py clash_fixed.yaml ./mihomo
           test -s clash_fixed.yaml
 
-      - name: Test nodes and collect stable egress IPs
-        run: |
-          set -euo pipefail
-          python3 ip_test.py
-          test -s test_results.json
-
-      - name: Remove only strongly suspected duplicate nodes
-        run: |
-          set -euo pipefail
-          python3 dedup_by_ip.py \
-            --config clash_fixed.yaml \
-            --results test_results.json \
-            --output clash_dedup.yaml \
-            --report dedup_report.json
-          test -s clash_dedup.yaml
-
-      - name: Validate deduplicated config
-        run: |
-          set -euo pipefail
-          python3 validate_mihomo.py clash_dedup.yaml ./mihomo
-          mv clash_dedup.yaml clash_fixed.yaml
-          test -s clash_fixed.yaml
-
       - name: Final structural validation
         run: |
           set -euo pipefail
@@ -127,10 +107,6 @@ jobs:
           name: clash-test-${{ github.run_id }}
           if-no-files-found: warn
           path: |
-            test_results.json
-            dedup_report.json
-            ip_test.log
-            ip_test_config.yaml
             clean_report.json
 
       - name: Commit & push cleaned file
