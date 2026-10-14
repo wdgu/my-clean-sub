@@ -1,9 +1,9 @@
 {
-  "source_proxies": 1797,
-  "valid_proxies": 1657,
-  "dropped_proxies": 140,
-  "invalid_drops": 140,
-  "invalid_drop_ratio": 0.07790762381747357,
+  "source_proxies": 1771,
+  "valid_proxies": 1639,
+  "dropped_proxies": 132,
+  "invalid_drops": 132,
+  "invalid_drop_ratio": 0.07453416149068323,
   "removed_proxy_groups": 0,
   "removed_rules": 0,
   "output": "clash_fixed.yaml"
